@@ -120,8 +120,11 @@ def pm_esummary(ids, chunk=180, pause=0.25):
                 t = (aid.get("idtype","") or "").lower()
                 if t == "doi":
                     doi = aid.get("value","")
-                elif t == "pmcid":
-                    pmcid = aid.get("value","")  # e.g., "PMC1234567"
+                elif t in ("pmc", "pmcid"):
+                    pmcid = aid.get("value","")
+                    if pmcid and not pmcid.startswith("PMC"):
+                        pmcid = "PMC" + pmcid
+
             out.append({
                 "PMID": pmid,
                 "Title": rec.get("title",""),
@@ -129,8 +132,9 @@ def pm_esummary(ids, chunk=180, pause=0.25):
                 "PubDate": rec.get("pubdate",""),
                 "Authors": ", ".join([a.get("name","") for a in rec.get("authors", [])][:5]),
                 "DOI": doi,
-                "PMCID": pmcid,  # <-- new
+                "PMCID": pmcid,
             })
+
         time.sleep(pause)
     return out
 
@@ -154,7 +158,7 @@ def resolve_pmcid(pmid):
             "db": "pmc",
             "id": pmid,
             "retmode": "json",
-            "linkname": "pubmed_pmc"  # <-- important
+            "linkname": "pubmed_pmc"
         })
         js = r.json()
         for ls in js.get("linksets", []):
@@ -162,11 +166,12 @@ def resolve_pmcid(pmid):
                 if db.get("dbto") == "pmc":
                     links = db.get("links", [])
                     if links:
-                        return "PMC" + links[0]["id"]
+                        pmc = links[0].get("id","")
+                        return "PMC" + pmc if pmc and not str(pmc).startswith("PMC") else str(pmc)
     except Exception:
         pass
     return ""
-
+    
 # -------------------- Crossref citations (cached) --------------
 def _load_cit_cache():
     if CIT_CACHE_PATH.exists():
@@ -299,6 +304,19 @@ with st.spinner("Fetching summaries & abstracts…"):
 
 df = pd.DataFrame(meta)
 df["Abstract"] = df["PMID"].map(abstracts).fillna("")
+# Ensure PMCID column exists
+if "PMCID" not in df.columns:
+    df["PMCID"] = ""
+
+# Fallback: resolve PMCID only if missing
+missing = df["PMCID"].isna() | df["PMCID"].eq("")
+df.loc[missing, "PMCID"] = df.loc[missing, "PMID"].apply(resolve_pmcid)
+
+# Compute OA + link
+df["PMCID"] = df["PMCID"].fillna("").astype(str)
+df["OA"] = df["PMCID"].str.startswith("PMC")
+df["PMCID_Link"] = np.where(df["OA"],
+    "https://www.ncbi.nlm.nih.gov/pmc/articles/" + df["PMCID"] + "/", "")
 
 # Filter by method focus
 df["MethodFocused"] = df.apply(lambda r: method_focused(r.get("Title",""), r.get("Abstract","")), axis=1)
