@@ -104,26 +104,32 @@ def pm_esearch(term, start_dt, end_dt, retmax=400):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def pm_esummary(ids, chunk=180, pause=0.25):
-    if not ids: return []
-    out=[]
+    if not ids:
+        return []
+    out = []
     for i in range(0, len(ids), chunk):
         batch = ids[i:i+chunk]
-        r = eutils_request("esummary.fcgi", {"db":"pubmed","id":",".join(batch),"retmode":"json"})
+        r = eutils_request("esummary.fcgi", {"db": "pubmed", "id": ",".join(batch), "retmode": "json"})
         data = r.json().get("result", {})
         for pmid in batch:
             rec = data.get(pmid, {})
-            if not rec: continue
-            doi = ""
+            if not rec:
+                continue
+            doi, pmcid = "", ""
             for aid in rec.get("articleids", []):
-                if aid.get("idtype") == "doi":
-                    doi = aid.get("value"); break
+                t = (aid.get("idtype","") or "").lower()
+                if t == "doi":
+                    doi = aid.get("value","")
+                elif t == "pmcid":
+                    pmcid = aid.get("value","")  # e.g., "PMC1234567"
             out.append({
                 "PMID": pmid,
                 "Title": rec.get("title",""),
                 "Journal": rec.get("source",""),
                 "PubDate": rec.get("pubdate",""),
                 "Authors": ", ".join([a.get("name","") for a in rec.get("authors", [])][:5]),
-                "DOI": doi
+                "DOI": doi,
+                "PMCID": pmcid,  # <-- new
             })
         time.sleep(pause)
     return out
@@ -143,17 +149,22 @@ def pm_efetch_abs(ids, pause=0.15):
 def resolve_pmcid(pmid):
     """Return PMCID (e.g., 'PMC1234567') if available, else ''."""
     try:
-        r = eutils_request("elink.fcgi", {"dbfrom":"pubmed","db":"pmc","id":pmid,"retmode":"json"})
-        links = r.json().get("linksets", [])
-        if not links: return ""
-        ids = links[0].get("linksetdbs", [])
-        for db in ids:
-            if db.get("dbto") == "pmc":
-                if db.get("links"):
-                    # links like {'id':'1234567'} → prefix 'PMC'
-                    return "PMC" + db["links"][0]["id"]
+        r = eutils_request("elink.fcgi", {
+            "dbfrom": "pubmed",
+            "db": "pmc",
+            "id": pmid,
+            "retmode": "json",
+            "linkname": "pubmed_pmc"  # <-- important
+        })
+        js = r.json()
+        for ls in js.get("linksets", []):
+            for db in ls.get("linksetdbs", []):
+                if db.get("dbto") == "pmc":
+                    links = db.get("links", [])
+                    if links:
+                        return "PMC" + links[0]["id"]
     except Exception:
-        return ""
+        pass
     return ""
 
 # -------------------- Crossref citations (cached) --------------
