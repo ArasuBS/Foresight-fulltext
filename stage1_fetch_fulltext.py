@@ -124,6 +124,10 @@ def pm_esummary(ids, chunk=180, pause=0.25):
                     pmcid = aid.get("value","")
                     if pmcid and not pmcid.startswith("PMC"):
                         pmcid = "PMC" + pmcid
+                        
+            # --- normalize PMCID to pure 'PMC12345678'
+            m = re.search(r'(PMC\d+)', str(pmcid))
+            pmcid = m.group(1) if m else ""
 
             out.append({
                 "PMID": pmid,
@@ -299,7 +303,6 @@ with st.spinner("Searching PubMed…"):
 
 with st.spinner("Fetching summaries & abstracts…"):
     meta = pm_esummary(ids)
-    st.write("PMCID sample:", [m.get("PMCID","") for m in meta[:10]])
     pmids = [m["PMID"] for m in meta]
     abstracts = pm_efetch_abs(pmids)
 
@@ -312,6 +315,7 @@ if "PMCID" not in df.columns:
 # Fallback: resolve PMCID only if missing
 missing = df["PMCID"].isna() | df["PMCID"].eq("")
 df.loc[missing, "PMCID"] = df.loc[missing, "PMID"].apply(resolve_pmcid)
+df["PMCID"] = df["PMCID"].apply(lambda x: re.search(r'(PMC\d+)', str(x)).group(1) if re.search(r'(PMC\d+)', str(x)) else "")
 
 # Compute OA + link
 df["PMCID"] = df["PMCID"].fillna("").astype(str)
