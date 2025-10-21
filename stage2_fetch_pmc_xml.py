@@ -238,7 +238,8 @@ with col1:
     uploaded = st.file_uploader("Upload stage1_shortlist.csv", type=["csv"])
     csv_path_text = st.text_input("Or path to stage1_shortlist.csv (optional)", value="")
 with col2:
-    topk = st.slider("Max OA papers to process (K)", 10, 300, 60, 5)
+    k_slider = st.slider("Max OA papers to process (K)", min_value=1, max_value=300, value=60, step=1)
+    topk = st.number_input("Or type exact K", min_value=1, max_value=300, value=int(k_slider), step=1)
     skip_existing = st.checkbox("Skip if XML already cached", value=True)
 with col3:
     enable_epmc = st.checkbox("Enable Europe PMC fallback", value=True)
