@@ -299,6 +299,7 @@ with st.spinner("Searching PubMed…"):
 
 with st.spinner("Fetching summaries & abstracts…"):
     meta = pm_esummary(ids)
+    st.write("PMCID sample:", [m.get("PMCID","") for m in meta[:10]])
     pmids = [m["PMID"] for m in meta]
     abstracts = pm_efetch_abs(pmids)
 
@@ -332,9 +333,7 @@ with st.spinner("Resolving citations & PMCID…"):
         m = re.search(r"(\d{4})", str(pdstr) or "")
         return int(m.group(1)) if m else 0
     df["Year"] = df["PubDate"].apply(_year)
-    df["PMCID"] = df["PMID"].apply(resolve_pmcid)
-    df["OA"] = df["PMCID"].apply(lambda x: bool(x))
-    df["PMCID_Link"] = df["PMCID"].apply(lambda x: f"https://www.ncbi.nlm.nih.gov/pmc/articles/{x}/" if x else "")
+    # PMCID/OA/PMCID_Link were already set earlier – do not overwrite them here
 
 # Semantic score (titles + abstracts)
 seed = ("ADC conjugation method development; site-specific; linkers; payload; DAR; HIC; TFF; GMP; "
