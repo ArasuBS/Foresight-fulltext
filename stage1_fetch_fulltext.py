@@ -278,7 +278,8 @@ with st.sidebar:
     query = st.text_area("PubMed query", value=DEFAULT_QUERY, height=220)
     months_back = st.number_input("Time window (months)", 1, 48, 24, 1)
     retmax = st.slider("Max PubMed items to fetch", 50, 1000, 400, 50)
-    topk = st.slider("Top K (keep for Stage 2)", 10, 120, 60, 5)
+    k1 = st.slider("Top K (keep for Stage 2)", min_value=1, max_value=120, value=60, step=1)
+    topk = st.number_input("Or type exact K", min_value=1, max_value=120, value=int(k1), step=1)
     oa_only = st.checkbox("Show OA-only (has PMCID)", value=False)
     debug = st.checkbox("Debug logs", value=False)
     if "run" not in st.session_state: st.session_state.run = False
