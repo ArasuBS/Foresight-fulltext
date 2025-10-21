@@ -16,10 +16,22 @@ TIMEOUT = 30
 RETRIES = 3
 PAUSE = 0.5  # seconds between retries
 
+# dump odd oa.fcgi responses for debugging
+OA_DUMP_DIR = Path(".cache/oa_manifests")
+OA_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+
 # --------------------------- Helpers --------------------------
 def normalize_pmcid(pmcid: str) -> str:
     m = re.search(r"(PMC\d+)", str(pmcid))
     return m.group(1) if m else ""
+
+def _dump_oa_manifest(pmcid: str, text: str, note: str):
+    try:
+        p = OA_DUMP_DIR / f"{normalize_pmcid(pmcid)}_{note}.xml"
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text or "")
+    except Exception:
+        pass
 
 def get_oa_manifest_xml(pmcid: str):
     """Call oa.fcgi and return its XML text (or None)."""
@@ -33,16 +45,19 @@ def get_oa_manifest_xml(pmcid: str):
 
 def parse_oa_links(oa_xml_text: str):
     """
-    Parse oa.fcgi response and return a list of dicts:
-      [{'format': 'xml'|'tgz'|..., 'href': 'https://...'}, ...]
+    Parse oa.fcgi response and return list:
+      [{'format': 'xml'|'tgz'|'tar.gz'|..., 'href': 'https://...'}, ...]
+    Tolerant to attribute order, case and quotes.
     """
     if not oa_xml_text:
         return []
-    # very light parsing via regex to avoid heavy XML deps
-    # <link format="xml" href="..."/>
     links = []
-    for fmt, href in re.findall(r'<link[^>]*format="([^"]+)"[^>]*href="([^"]+)"', oa_xml_text):
-        links.append({"format": fmt.lower(), "href": href})
+    for fmt, href in re.findall(
+        r'<link[^>]*format\s*=\s*[\'"]([^\'"]+)[\'"][^>]*href\s*=\s*[\'"]([^\'"]+)[\'"]',
+        oa_xml_text,
+        flags=re.IGNORECASE
+    ):
+        links.append({"format": fmt.strip().lower(), "href": href.strip()})
     return links
 
 def download_bytes(url: str):
@@ -64,12 +79,14 @@ def save_xml_from_tgz(buf: bytes, pmcid: str) -> tuple[str, str]:
     try:
         fobj = io.BytesIO(buf)
         with tarfile.open(fileobj=fobj, mode="r:gz") as tf:
-            # Prefer *.nxml
             candidates = [m for m in tf.getmembers() if m.name.lower().endswith((".nxml", ".xml"))]
             if not candidates:
                 return "", "no_xml_in_tgz"
             member = candidates[0]
-            xml_bytes = tf.extractfile(member).read()
+            extracted = tf.extractfile(member)
+            if extracted is None:
+                return "", "tgz_member_read_error"
+            xml_bytes = extracted.read()
             out_path = XML_DIR / f"{pmcid}.xml"
             with open(out_path, "wb") as f:
                 f.write(xml_bytes)
@@ -107,18 +124,19 @@ def fetch_and_cache_xml(pmcid: str) -> tuple[str, str]:
     if oa_xml is None:
         return "", "oa_manifest_error"
 
+    # dump error manifests
+    if "<error" in oa_xml.lower():
+        _dump_oa_manifest(pmcid, oa_xml, "error")
+
     # embargo detection (simple)
-    if re.search(r"embargo-date", oa_xml, re.IGNORECASE):
-        # We still might get XML, but warn in note.
-        embargo_note = "embargo_present"
-    else:
-        embargo_note = ""
+    embargo_note = "embargo_present" if re.search(r"embargo-date", oa_xml, re.IGNORECASE) else ""
 
     links = parse_oa_links(oa_xml)
     if not links:
+        _dump_oa_manifest(pmcid, oa_xml, "no_links")
         return "", "no_links"
 
-    # Prefer XML direct, else TGZ
+    # Prefer XML direct, else TGZ/tar.gz
     xml_link = next((l["href"] for l in links if l["format"] == "xml"), None)
     tgz_link = next((l["href"] for l in links if l["format"] in ("tgz", "tar.gz")), None)
 
@@ -129,6 +147,7 @@ def fetch_and_cache_xml(pmcid: str) -> tuple[str, str]:
             if note.startswith("ok"):
                 return path, f"{note}{';'+embargo_note if embargo_note else ''}"
         # fall through to tgz if xml failed
+
     if tgz_link:
         data = download_bytes(tgz_link)
         if data:
@@ -194,7 +213,6 @@ if df.empty:
 # Choose top K OA (keep original order; or sort by Citations if present)
 if "Citations" in df.columns:
     df = df.sort_values(["Citations"], ascending=False).reset_index(drop=True)
-
 df = df.drop_duplicates(subset=["PMCID"]).head(topk).reset_index(drop=True)
 
 st.write(f"**OA rows selected:** {len(df)}")
@@ -234,6 +252,9 @@ manifest = pd.DataFrame(results)
 st.subheader("Results (Stage 2 Manifest)")
 st.dataframe(manifest[["PMCID","PMID","status","xml_path","Title"]], use_container_width=True, height=400)
 
+# Status breakdown so you can see why things failed/succeeded
+st.write("Status counts:", manifest["status"].value_counts(dropna=False))
+
 ok = (manifest["status"].str.startswith("ok")) | (manifest["status"].eq("cached"))
 st.write(f"**Downloaded/ cached XMLs:** {int(ok.sum())} / {len(manifest)}")
 
@@ -262,5 +283,4 @@ except Exception as e:
     st.warning(f"Could not create ZIP: {e}")
 
 st.markdown("---")
-st.caption("Notes: Uses PMC oa.fcgi. Prefers direct XML, falls back to TGZ. Handles simple embargo flags and caching.")
-
+st.caption("Notes: Uses PMC oa.fcgi. Prefers direct XML, falls back to TGZ. Saves odd manifests to .cache/oa_manifests for debugging.")
