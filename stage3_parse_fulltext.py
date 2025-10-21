@@ -245,24 +245,36 @@ missing = [c for c in need_cols if c not in manifest.columns]
 if missing:
     st.warning(f"Manifest missing expected columns: {missing} — continuing with available fields.")
 
-# Prefer rows with XML, else HTML; skip PDFs for now
+# ---- Inspect manifest quickly ----
+st.write("Manifest columns:", list(manifest.columns))
+st.write("Sample rows:", manifest.head(3))
+st.write("Status value counts:", manifest.get("status", pd.Series()).value_counts())
+
+# ---- Normalize path fields & prefer XML then HTML; skip PDFs for now ----
+def _norm_path(x: object) -> str:
+    s = str(x).strip() if pd.notna(x) else ""
+    return "" if s.lower() in ("", "nan", "none") else s
+
 rows = []
+xml_ok = html_ok = pdf_only = 0
+
 for _, r in manifest.iterrows():
-    xmlp = str(r.get("xml_path","") or "").strip()
-    htmlp = str(r.get("publisher_html","") or "").strip()
-    pdfp = str(r.get("publisher_pdf","") or "").strip()
-    if xmlp:
-        rows.append((r, "xml", xmlp))
-    elif htmlp:
-        rows.append((r, "html", htmlp))
-    # ignore pdf-only rows for Stage 3
+    xmlp = _norm_path(r.get("xml_path", ""))
+    htmlp = _norm_path(r.get("publisher_html", ""))
+    pdfp = _norm_path(r.get("publisher_pdf", ""))
+
+    if xmlp and Path(xmlp).exists():
+        rows.append((r, "xml", xmlp)); xml_ok += 1
+    elif htmlp and Path(htmlp).exists():
+        rows.append((r, "html", htmlp)); html_ok += 1
+    elif pdfp:
+        pdf_only += 1  # present but we skip PDFs in Stage 3
+
+st.write(f"Found XML files: {xml_ok} | HTML files: {html_ok} | PDF-only (skipped): {pdf_only}")
 
 if not rows:
-    st.warning("No rows with XML or HTML found to parse. Enable Unpaywall HTML or fetch PMC XML in Stage 2.")
+    st.warning("No parsable files found. Likely your rows are PDF-only or the paths are missing. Enable Unpaywall HTML or ensure PMC XMLs were saved in Stage 2.")
     st.stop()
-
-rows = rows[:int(max_k)]
-st.write(f"**Parsing {len(rows)} papers** (XML preferred, HTML fallback).")
 
 # ---------------------- Parse loop ---------------------------
 sec_records, tbl_records, fig_records = [], [], []
