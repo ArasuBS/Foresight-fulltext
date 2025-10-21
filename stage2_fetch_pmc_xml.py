@@ -59,6 +59,13 @@ def parse_oa_links(oa_xml_text: str):
     ):
         links.append({"format": fmt.strip().lower(), "href": href.strip()})
     return links
+    
+def normalize_link_url(url: str) -> str:
+    # Many PMC OA links are ftp://ftp.ncbi.nlm.nih.gov/... — requests can't fetch ftp.
+    # Use the HTTPS mirror.
+    if url.startswith("ftp://"):
+        return url.replace("ftp://", "https://", 1)
+    return url
 
 def download_bytes(url: str):
     for attempt in range(RETRIES):
@@ -141,7 +148,7 @@ def fetch_and_cache_xml(pmcid: str) -> tuple[str, str]:
     tgz_link = next((l["href"] for l in links if l["format"] in ("tgz", "tar.gz")), None)
 
     if xml_link:
-        data = download_bytes(xml_link)
+        data = download_bytes(normalize_link_url(xml_link))
         if data:
             path, note = save_xml_bytes(data, pmcid)
             if note.startswith("ok"):
@@ -149,7 +156,7 @@ def fetch_and_cache_xml(pmcid: str) -> tuple[str, str]:
         # fall through to tgz if xml failed
 
     if tgz_link:
-        data = download_bytes(tgz_link)
+        data = download_bytes(normalize_link_url(tgz_link))
         if data:
             path, note = save_xml_from_tgz(data, pmcid)
             if note.startswith("ok"):
