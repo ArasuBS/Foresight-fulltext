@@ -161,7 +161,9 @@ def fetch_and_cache_xml(pmcid: str) -> tuple[str, str]:
             path, note = save_xml_from_tgz(data, pmcid)
             if note.startswith("ok"):
                 return path, f"{note}{';'+embargo_note if embargo_note else ''}"
-        return "", "tgz_download_or_extract_failed"
+            # bubble up the exact failure (e.g., no_xml_in_tgz, tgz_extract_error)
+            return "", note # bubble exact extract error
+        return "", "tgz_download_or_extract_failed"  # <-- instead of tgz_download_or_extract_failed
 
     return "", "no_xml_format_found"
 
