@@ -423,26 +423,62 @@ ok_xml = (manifest["status"].str.contains("ok_xml|ok_tgz|cached", case=False, na
 ok_pub = (manifest["status"].str.contains("ok_pdf|ok_html", case=False, na=False))
 st.write(f"**XML ready:** {int(ok_xml.sum())} / {len(manifest)}  |  **Publisher OA files:** {int(ok_pub.sum())}")
 
-# ---- Build & persist ONE full bundle ZIP ----
-full_zip = build_full_bundle_zip(manifest)
+# === Single "Download EVERYTHING" ZIP with IST timestamp ===
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from pathlib import Path
 
-# Keep across reruns and also write to disk (optional)
+# Build one ZIP that includes: manifest CSV, all PMC XMLs, publisher OA files, and debug manifests
+def build_full_bundle_zip(manifest_df: pd.DataFrame) -> bytes:
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 1) include manifest CSV
+        zf.writestr("stage2_manifest.csv", manifest_df.to_csv(index=False))
+
+        # 2) include all PMC XMLs
+        for p in Path("pmc_xml").glob("PMC*.xml"):
+            zf.write(p.as_posix(), arcname=f"pmc_xml/{p.name}")
+
+        # 3) include publisher OA files (HTML/PDF)
+        pub_dir = Path("publisher_oa")
+        if pub_dir.exists():
+            for p in pub_dir.glob("*"):
+                if p.is_file():
+                    zf.write(p.as_posix(), arcname=f"publisher_oa/{p.name}")
+
+        # 4) include OA manifest dumps (optional debugging)
+        dump_dir = Path(".cache/oa_manifests")
+        if dump_dir.exists():
+            for p in dump_dir.glob("*.xml"):
+                zf.write(p.as_posix(), arcname=f"oa_manifests/{p.name}")
+
+    return buf.getvalue()
+
+# Build the zip and timestamp it in IST
+full_zip = build_full_bundle_zip(manifest)
+ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+ts = ist_now.strftime("%Y%m%d_%H%M%S")   # e.g., 20251024_184932
+zip_name = f"stage2_full_bundle_IST_{ts}.zip"
+
+# Persist in session so it survives reruns (e.g., after clicking download)
 if "stage2_store" not in st.session_state:
     st.session_state.stage2_store = {}
 st.session_state.stage2_store["full_bundle_zip"] = full_zip
+st.session_state.stage2_store["zip_name"] = zip_name
 st.session_state.stage2_store["manifest_csv"] = manifest.to_csv(index=False).encode("utf-8")
 
-# Optional disk copies (handy after refresh)
-Path("stage2_full_bundle.zip").write_bytes(full_zip)
-Path("stage2_manifest.csv").write_bytes(st.session_state.stage2_store["manifest_csv"])
+# (Optional) also write to disk on the server
+Path(zip_name).write_bytes(full_zip)
+Path(f"stage2_manifest_IST_{ts}.csv").write_bytes(st.session_state.stage2_store["manifest_csv"])
 
-# ---- Single download button ----
+# One-click download (timestamped)
 st.download_button(
     "Download EVERYTHING (ZIP)",
     data=st.session_state.stage2_store["full_bundle_zip"],
-    file_name="stage2_full_bundle.zip",
+    file_name=st.session_state.stage2_store["zip_name"],
     mime="application/zip",
-    key="dl_full_bundle"
+    key="dl_full_bundle",
 )
 
 # -------- Persist outputs so downloads survive reruns --------
