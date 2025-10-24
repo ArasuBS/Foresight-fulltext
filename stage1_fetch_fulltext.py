@@ -274,6 +274,17 @@ st.set_page_config(page_title="Foresight Full-Text — Stage 1", layout="wide")
 st.title("Foresight Full-Text — Stage 1 (Shortlist & OA detection)")
 st.caption("PubMed search → Abstract filter → Citations (cached) → PMCID (OA) → Rank → Top K export")
 
+prev = st.session_state.get("stage1_store", {})
+if prev.get("bundle_zip"):
+    with st.expander("Download Stage 1 — previous run", expanded=True):
+        st.download_button(
+            "Download Stage 1 Bundle (ZIP)",
+            data=prev["bundle_zip"],
+            file_name=prev.get("zip_name", "stage1_shortlist_bundle.zip"),
+            mime="application/zip",
+            key="prev_dl_stage1_bundle",
+        )
+
 with st.sidebar:
     query = st.text_area("PubMed query", value=DEFAULT_QUERY, height=220)
     months_back = st.number_input("Time window (months)", 1, 48, 24, 1)
@@ -363,14 +374,66 @@ st.dataframe(
 tot = len(df); tot_oa = int(df["OA"].sum())
 st.write(f"**Total method-focused:** {tot} | **Open Access (PMCID):** {tot_oa} | **Exporting top K = {topk}**")
 
-# Export CSV (top K, preserve OA info + links)
-export_cols = ["Title","Journal","PubDate","Authors","Citations","Year","PMID","DOI","PMCID","PMCID_Link","OA","SemanticScore","Abstract"]
+# === One-click IST-timestamped bundle for Stage 1 ===
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from pathlib import Path
+import io, zipfile, json
+
+# Prepare data
+export_cols = ["Title","Journal","PubDate","Authors","Citations","Year","PMID","DOI",
+               "PMCID","PMCID_Link","OA","SemanticScore","Abstract"]
 topK_df = df.head(topk)[export_cols].copy()
+
+def build_stage1_bundle_zip(topk_df: pd.DataFrame, all_df: pd.DataFrame,
+                            query_str: str, months_back_val: int, retmax_val: int, topk_val: int) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 1) Top-K shortlist
+        zf.writestr("stage1_shortlist.csv", topk_df.to_csv(index=False))
+        # 2) Full dataframe (post-filter, ranked)
+        zf.writestr("stage1_all_ranked.csv", all_df.to_csv(index=False))
+        # 3) Metadata (query + params)
+        meta = {
+            "query": query_str,
+            "months_back": months_back_val,
+            "retmax": retmax_val,
+            "topk": topk_val,
+            "generated_at_ist": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+        }
+        zf.writestr("stage1_meta.json", json.dumps(meta, indent=2))
+        # 4) README
+        zf.writestr("README.txt",
+            "Foresight Stage 1 bundle\n"
+            "- stage1_shortlist.csv: Top-K rows you’ll pass to Stage 2\n"
+            "- stage1_all_ranked.csv: All method-focused ranked rows\n"
+            "- stage1_meta.json: query & parameters\n"
+        )
+    return buf.getvalue()
+
+# Build ZIP and timestamp it (IST)
+ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+ts = ist_now.strftime("%Y%m%d_%H%M%S")
+zip_bytes = build_stage1_bundle_zip(topK_df, df.reset_index(drop=True), query, int(months_back), int(retmax), int(topk))
+zip_name = f"stage1_shortlist_bundle_IST_{ts}.zip"
+
+# Persist for reruns + optional disk copies
+if "stage1_store" not in st.session_state:
+    st.session_state.stage1_store = {}
+st.session_state.stage1_store["bundle_zip"] = zip_bytes
+st.session_state.stage1_store["zip_name"] = zip_name
+st.session_state.stage1_store["shortlist_csv"] = topK_df.to_csv(index=False).encode("utf-8")
+
+Path(zip_name).write_bytes(zip_bytes)  # optional file on disk
+Path(f"stage1_shortlist_IST_{ts}.csv").write_bytes(st.session_state.stage1_store["shortlist_csv"])
+
+# Download button (single, timestamped)
 st.download_button(
-    "Download Shortlist (CSV)",
-    data=topK_df.to_csv(index=False).encode("utf-8"),
-    file_name="stage1_shortlist.csv",
-    mime="text/csv"
+    "Download Stage 1 Bundle (ZIP)",
+    data=st.session_state.stage1_store["bundle_zip"],
+    file_name=st.session_state.stage1_store["zip_name"],
+    mime="application/zip",
+    key="dl_stage1_bundle",
 )
 
 # Notes & next steps
