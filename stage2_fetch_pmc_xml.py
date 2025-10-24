@@ -355,41 +355,67 @@ ok_xml = (manifest["status"].str.contains("ok_xml|ok_tgz|cached", case=False, na
 ok_pub = (manifest["status"].str.contains("ok_pdf|ok_html", case=False, na=False))
 st.write(f"**XML ready:** {int(ok_xml.sum())} / {len(manifest)}  |  **Publisher OA files:** {int(ok_pub.sum())}")
 
-# Save manifest + ZIPs
-try:
-    manifest.to_csv("stage2_manifest.csv", index=False)
-    st.download_button(
-        "Download manifest (CSV)",
-        data=manifest.to_csv(index=False).encode("utf-8"),
-        file_name="stage2_manifest.csv",
-        mime="text/csv"
-    )
-except Exception as e:
-    st.warning(f"Could not write manifest: {e}")
+# -------- Persist outputs so downloads survive reruns --------
+if "stage2_store" not in st.session_state:
+    st.session_state.stage2_store = {}
 
-# ZIP of XMLs
-try:
-    buf_xml = io.BytesIO()
-    with zipfile.ZipFile(buf_xml, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in XML_DIR.glob("PMC*.xml"):
-            zf.write(p.as_posix(), arcname=p.name)
-    st.download_button("Download all XMLs (ZIP)", data=buf_xml.getvalue(),
-                       file_name="pmc_xml_bundle.zip", mime="application/zip")
-except Exception as e:
-    st.warning(f"Could not create XML ZIP: {e}")
+# CSV bytes
+manifest_csv_bytes = manifest.to_csv(index=False).encode("utf-8")
+st.session_state.stage2_store["manifest_csv"] = manifest_csv_bytes
+
+# ZIP of PMC XMLs (from files currently on disk)
+buf_xml = io.BytesIO()
+with zipfile.ZipFile(buf_xml, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for p in XML_DIR.glob("PMC*.xml"):
+        zf.write(p.as_posix(), arcname=p.name)
+xml_zip_bytes = buf_xml.getvalue()
+st.session_state.stage2_store["xml_zip"] = xml_zip_bytes
 
 # ZIP of publisher OA (if any)
-try:
-    files = list(PUB_DIR.glob("*"))
-    if files:
-        buf_pub = io.BytesIO()
-        with zipfile.ZipFile(buf_pub, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in files:
-                zf.write(p.as_posix(), arcname=p.name)
-        st.download_button("Download publisher OA files (ZIP)", data=buf_pub.getvalue(),
-                           file_name="publisher_oa_bundle.zip", mime="application/zip")
-except Exception as e:
-    st.warning(f"Could not create publisher OA ZIP: {e}")
+pub_files = list(PUB_DIR.glob("*"))
+if pub_files:
+    buf_pub = io.BytesIO()
+    with zipfile.ZipFile(buf_pub, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in pub_files:
+            zf.write(p.as_posix(), arcname=p.name)
+    st.session_state.stage2_store["html_zip"] = buf_pub.getvalue()
+else:
+    st.session_state.stage2_store["html_zip"] = None
+
+# Optional: also write to disk so you can grab them even after a full refresh
+Path("stage2_manifest.csv").write_bytes(manifest_csv_bytes)
+Path("pmc_xml_bundle.zip").write_bytes(xml_zip_bytes)
+if st.session_state.stage2_store["html_zip"]:
+    Path("publisher_oa_bundle.zip").write_bytes(st.session_state.stage2_store["html_zip"])
+
+# ---------------- Download buttons (from session_state) ----------------
+st.download_button(
+    "Download manifest (CSV)",
+    data=st.session_state.stage2_store["manifest_csv"],
+    file_name="stage2_manifest.csv",
+    mime="text/csv",
+    key="dl_manifest_csv"
+)
+
+st.download_button(
+    "Download all XMLs (ZIP)",
+    data=st.session_state.stage2_store["xml_zip"],
+    file_name="pmc_xml_bundle.zip",
+    mime="application/zip",
+    key="dl_xml_zip"
+)
+
+html_zip = st.session_state.stage2_store.get("html_zip")
+if html_zip:
+    st.download_button(
+        "Download publisher OA files (ZIP)",
+        data=html_zip,
+        file_name="publisher_oa_bundle.zip",
+        mime="application/zip",
+        key="dl_html_zip"
+    )
+else:
+    st.caption("No publisher OA files were saved in this run.")
 
 st.markdown("---")
 st.caption("Order: PMC → Europe PMC (XML) → Unpaywall (publisher OA). All downloads respect OA availability & licenses.")
