@@ -227,11 +227,79 @@ def download_publisher_pdf_or_html(doi: str, email: str, pmcid: str | None = Non
             return "", str(out), f"ok_html;license={lic or ''};source=unpaywall"
 
     return "", "", "unpaywall_no_download"
+def build_full_bundle_zip(manifest: pd.DataFrame) -> bytes:
+    """
+    Build a single ZIP with:
+      - stage2_manifest.csv
+      - pmc_xml/*.xml
+      - publisher_oa/* (html/pdf if present)
+      - .cache/oa_manifests/*.xml (debug, if present)
+      - README.txt (summary + timestamp)
+    """
+    import io, zipfile, datetime
+    buf = io.BytesIO()
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # manifest
+        manifest_csv = manifest.to_csv(index=False).encode("utf-8")
+        zf.writestr("stage2_manifest.csv", manifest_csv)
+
+        # pmc xmls
+        if XML_DIR.exists():
+            for p in XML_DIR.glob("PMC*.xml"):
+                zf.write(p.as_posix(), arcname=f"pmc_xml/{p.name}")
+
+        # publisher OA (html/pdf)
+        if PUB_DIR.exists():
+            for p in PUB_DIR.glob("*"):
+                if p.suffix.lower() in (".html", ".htm", ".pdf"):
+                    zf.write(p.as_posix(), arcname=f"publisher_oa/{p.name}")
+
+        # optional: oa.fcgi dumps (useful for debugging)
+        if OA_DUMP_DIR.exists():
+            for p in OA_DUMP_DIR.glob("*.xml"):
+                zf.write(p.as_posix(), arcname=f"debug_oa_manifests/{p.name}")
+
+        # readme
+        ok_xml = (manifest["status"].str.contains("ok_xml|ok_tgz|cached", case=False, na=False)).sum()
+        ok_pub = (manifest["status"].str.contains("ok_pdf|ok_html", case=False, na=False)).sum()
+        readme = (
+            "Foresight Full-Text — Stage 2 Bundle\n"
+            f"Generated (UTC): {ts}\n\n"
+            f"Rows: {len(manifest)}\n"
+            f"XML ready: {ok_xml}\n"
+            f"Publisher OA files: {ok_pub}\n"
+            "\nFolders:\n"
+            "  pmc_xml/         — PMC XML files\n"
+            "  publisher_oa/    — Publisher HTML/PDF (OA)\n"
+            "  debug_oa_manifests/ — Raw oa.fcgi responses for debugging (optional)\n"
+            "\nFiles:\n"
+            "  stage2_manifest.csv — Final manifest of this run\n"
+        )
+        zf.writestr("README.txt", readme)
+
+    return buf.getvalue()
 
 # --------------------------- UI -------------------------------
 st.set_page_config(page_title="Foresight Full-Text — Stage 2 (PMC XML + OA fallback)", layout="wide")
 st.title("Foresight Full-Text — Stage 2")
 st.caption("PMC XML via oa.fcgi → Europe PMC XML fallback → Unpaywall (publisher OA) optional → Cache → Manifest + ZIP")
+
+# --- Previous run downloads (optional but recommended) ---
+prev = st.session_state.get("stage2_store", {})
+if prev.get("full_bundle_zip"):
+    with st.expander("Download from previous run", expanded=True):
+        st.download_button(
+            "Download EVERYTHING (ZIP)",
+            data=prev["full_bundle_zip"],
+            file_name="stage2_full_bundle.zip",
+            mime="application/zip",
+            key="prev_dl_full_bundle",
+        )
+        if st.button("Clear saved downloads"):
+            st.session_state.stage2_store = {}
+            st.experimental_rerun()
 
 col1, col2, col3 = st.columns([2,1,1])
 with col1:
@@ -355,6 +423,28 @@ ok_xml = (manifest["status"].str.contains("ok_xml|ok_tgz|cached", case=False, na
 ok_pub = (manifest["status"].str.contains("ok_pdf|ok_html", case=False, na=False))
 st.write(f"**XML ready:** {int(ok_xml.sum())} / {len(manifest)}  |  **Publisher OA files:** {int(ok_pub.sum())}")
 
+# ---- Build & persist ONE full bundle ZIP ----
+full_zip = build_full_bundle_zip(manifest)
+
+# Keep across reruns and also write to disk (optional)
+if "stage2_store" not in st.session_state:
+    st.session_state.stage2_store = {}
+st.session_state.stage2_store["full_bundle_zip"] = full_zip
+st.session_state.stage2_store["manifest_csv"] = manifest.to_csv(index=False).encode("utf-8")
+
+# Optional disk copies (handy after refresh)
+Path("stage2_full_bundle.zip").write_bytes(full_zip)
+Path("stage2_manifest.csv").write_bytes(st.session_state.stage2_store["manifest_csv"])
+
+# ---- Single download button ----
+st.download_button(
+    "Download EVERYTHING (ZIP)",
+    data=st.session_state.stage2_store["full_bundle_zip"],
+    file_name="stage2_full_bundle.zip",
+    mime="application/zip",
+    key="dl_full_bundle"
+)
+
 # -------- Persist outputs so downloads survive reruns --------
 if "stage2_store" not in st.session_state:
     st.session_state.stage2_store = {}
@@ -387,35 +477,6 @@ Path("stage2_manifest.csv").write_bytes(manifest_csv_bytes)
 Path("pmc_xml_bundle.zip").write_bytes(xml_zip_bytes)
 if st.session_state.stage2_store["html_zip"]:
     Path("publisher_oa_bundle.zip").write_bytes(st.session_state.stage2_store["html_zip"])
-
-# ---------------- Download buttons (from session_state) ----------------
-st.download_button(
-    "Download manifest (CSV)",
-    data=st.session_state.stage2_store["manifest_csv"],
-    file_name="stage2_manifest.csv",
-    mime="text/csv",
-    key="dl_manifest_csv"
-)
-
-st.download_button(
-    "Download all XMLs (ZIP)",
-    data=st.session_state.stage2_store["xml_zip"],
-    file_name="pmc_xml_bundle.zip",
-    mime="application/zip",
-    key="dl_xml_zip"
-)
-
-html_zip = st.session_state.stage2_store.get("html_zip")
-if html_zip:
-    st.download_button(
-        "Download publisher OA files (ZIP)",
-        data=html_zip,
-        file_name="publisher_oa_bundle.zip",
-        mime="application/zip",
-        key="dl_html_zip"
-    )
-else:
-    st.caption("No publisher OA files were saved in this run.")
 
 st.markdown("---")
 st.caption("Order: PMC → Europe PMC (XML) → Unpaywall (publisher OA). All downloads respect OA availability & licenses.")
