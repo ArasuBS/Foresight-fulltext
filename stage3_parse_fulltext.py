@@ -211,6 +211,32 @@ def parse_publisher_html(html_text: str) -> Tuple[List[Dict], List[Dict], List[D
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 st.caption("Parses PMC XML (preferred) and Publisher HTML (fallback) → sections / tables / figure captions")
+# --- Previous run (if any) ---
+prev = st.session_state.get("stage3_store")
+if prev:
+    with st.expander("⬇️ Previous run — quick downloads", expanded=False):
+        st.download_button("Download ALL (ZIP)",
+                           data=prev["full_bundle_zip"],
+                           file_name=prev["bundle_name"],
+                           mime="application/zip",
+                           key="prev_zip")
+        st.download_button("Sections (CSV)",
+                           data=prev["sections_csv"],
+                           file_name="sections.csv",
+                           mime="text/csv",
+                           key="prev_sec")
+        if prev.get("tables_csv"):
+            st.download_button("Tables (CSV)",
+                               data=prev["tables_csv"],
+                               file_name="tables.csv",
+                               mime="text/csv",
+                               key="prev_tbl")
+        if prev.get("figures_csv"):
+            st.download_button("Figures (CSV)",
+                               data=prev["figures_csv"],
+                               file_name="figures.csv",
+                               mime="text/csv",
+                               key="prev_fig")
 
 col1, col2 = st.columns([2,1])
 with col1:
@@ -358,32 +384,62 @@ if parse_figcaps:
     st.subheader("Figure captions (preview)")
     st.dataframe(fig_df.head(10), use_container_width=True, height=250)
 
-# Save & offer downloads
-try:
-    sec_csv = sec_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download sections (CSV)", data=sec_csv, file_name="sections.csv", mime="text/csv")
-    if parse_tables:
-        tbl_csv = tbl_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download tables (CSV)", data=tbl_csv, file_name="tables.csv", mime="text/csv")
-    if parse_figcaps:
-        fig_csv = fig_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download figure captions (CSV)", data=fig_csv, file_name="figures.csv", mime="text/csv")
-except Exception as e:
-    st.warning(f"CSV write error: {e}")
+# ---------------------- Persist + single ZIP download ----------------------
+from datetime import datetime, timezone, timedelta
 
-# ZIP bundle
-try:
+def ist_timestamp() -> str:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).strftime("%Y%m%d_%H%M%S_IST")
+
+def build_stage3_bundle_zip(sec_df, tbl_df, fig_df) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("sections.csv", sec_df.to_csv(index=False))
-        if parse_tables:
+        if parse_tables and not tbl_df.empty:
             zf.writestr("tables.csv", tbl_df.to_csv(index=False))
-        if parse_figcaps:
+        if parse_figcaps and not fig_df.empty:
             zf.writestr("figures.csv", fig_df.to_csv(index=False))
-    st.download_button("Download all parsed outputs (ZIP)", data=buf.getvalue(),
-                       file_name="stage3_parsed_bundle.zip", mime="application/zip")
-except Exception as e:
-    st.warning(f"ZIP write error: {e}")
+    return buf.getvalue()
+
+# Build CSV bytes for current run
+sections_csv_bytes = sec_df.to_csv(index=False).encode("utf-8")
+tables_csv_bytes   = tbl_df.to_csv(index=False).encode("utf-8") if parse_tables else None
+figures_csv_bytes  = fig_df.to_csv(index=False).encode("utf-8") if parse_figcaps else None
+
+# Build bundle ZIP (timestamped in IST)
+bundle_bytes = build_stage3_bundle_zip(sec_df, tbl_df, fig_df)
+bundle_name  = f"stage3_parsed_bundle_{ist_timestamp()}.zip"
+
+# Persist in session (survives reruns)
+if "stage3_store" not in st.session_state:
+    st.session_state.stage3_store = {}
+st.session_state.stage3_store.update({
+    "full_bundle_zip": bundle_bytes,
+    "bundle_name": bundle_name,
+    "sections_csv": sections_csv_bytes,
+    "tables_csv": tables_csv_bytes,
+    "figures_csv": figures_csv_bytes,
+})
+
+# Also write to disk so a rerun still has files available on server
+Path("stage3_parsed_bundle.zip").write_bytes(bundle_bytes)
+Path("sections.csv").write_bytes(sections_csv_bytes)
+if tables_csv_bytes:  Path("tables.csv").write_bytes(tables_csv_bytes)
+if figures_csv_bytes: Path("figures.csv").write_bytes(figures_csv_bytes)
+
+# One-click download (current run)
+st.download_button("⬇️ Download EVERYTHING (ZIP)",
+                   data=bundle_bytes,
+                   file_name=bundle_name,
+                   mime="application/zip",
+                   key="dl_stage3_zip")
+
+# Optional: individual downloads (current run)
+st.download_button("Sections (CSV)", data=sections_csv_bytes, file_name="sections.csv", mime="text/csv", key="dl_stage3_sec")
+if tables_csv_bytes:
+    st.download_button("Tables (CSV)", data=tables_csv_bytes, file_name="tables.csv", mime="text/csv", key="dl_stage3_tbl")
+if figures_csv_bytes:
+    st.download_button("Figures (CSV)", data=figures_csv_bytes, file_name="figures.csv", mime="text/csv", key="dl_stage3_fig")
 
 st.markdown("---")
 st.caption("Stage 3 extracts structured text from PMC XML (JATS) and basic sections from publisher HTML.")
