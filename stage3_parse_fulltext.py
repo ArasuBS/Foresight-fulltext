@@ -216,6 +216,9 @@ col1, col2 = st.columns([2,1])
 with col1:
     uploaded = st.file_uploader("Upload stage2_manifest.csv", type=["csv"])
     csv_path_text = st.text_input("Or path to manifest (optional)", value="")
+    # (INSERT RIGHT BELOW csv_path_text)
+    zip_upload = st.file_uploader("Optionally upload Stage-2 full bundle ZIP", type=["zip"], key="stage2_zip")
+
 with col2:
     max_k = st.number_input("Max papers to parse (K)", min_value=1, max_value=500, value=30, step=1)
     parse_tables = st.checkbox("Extract tables", value=True)
@@ -239,6 +242,27 @@ try:
 except Exception as e:
     st.error(f"Failed to read CSV: {e}")
     st.stop()
+# (INSERT AFTER manifest is successfully loaded, BEFORE _norm_path)
+
+# Ensure target dirs exist
+XML_DIR.mkdir(exist_ok=True)
+PUB_DIR.mkdir(exist_ok=True)
+
+def _extract_stage2_zip(file_obj):
+    import zipfile, io
+    with zipfile.ZipFile(file_obj) as zf:
+        for m in zf.infolist():
+            name = m.filename
+            # extract pmc_xml and publisher_oa files
+            if name.startswith("pmc_xml/") or name.startswith("publisher_oa/"):
+                zf.extract(m, ".")
+            # also drop the manifest to cwd if present
+            elif name.endswith("stage2_manifest.csv") and not Path("stage2_manifest.csv").exists():
+                zf.extract(m, ".")
+
+if zip_upload is not None:
+    _extract_stage2_zip(io.BytesIO(zip_upload.read()))
+    st.success("Bundle extracted. Re-checking file paths…")
 
 need_cols = {"PMCID","PMID","DOI","Title","xml_path","publisher_html","publisher_pdf","status"}
 missing = [c for c in need_cols if c not in manifest.columns]
