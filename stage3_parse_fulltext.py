@@ -372,6 +372,49 @@ for i, (r, kind, path_str) in enumerate(rows, start=1):
 sec_df = pd.DataFrame(sec_records) if sec_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","section_id","section_title","text","level"])
 tbl_df = pd.DataFrame(tbl_records) if tbl_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","table_id","label","caption","html"])
 fig_df = pd.DataFrame(fig_records) if fig_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","figure_id","label","caption"])
+# ---- Build ONE combined CSV: stage3_all.csv ----
+def _ensure_cols(df, cols_defaults):
+    for c, d in cols_defaults.items():
+        if c not in df.columns:
+            df[c] = d
+    return df
+
+# Normalize to a common schema
+base_cols_defaults = {
+    "PMCID": "", "PMID": "", "DOI": "", "Title": "", "source": "",
+    "kind": "", "item_id": "", "title_label": "", "caption": "",
+    "html": "", "text": "", "level": 0
+}
+
+sec_out = sec_df.copy()
+sec_out["kind"] = "section"
+sec_out["item_id"] = sec_out.get("section_id", "")
+sec_out["title_label"] = sec_out.get("section_title", "")
+sec_out["caption"] = ""
+sec_out["html"] = ""
+sec_out = _ensure_cols(sec_out, base_cols_defaults)
+
+tbl_out = tbl_df.copy()
+tbl_out["kind"] = "table"
+tbl_out["item_id"] = tbl_out.get("table_id", "")
+tbl_out["title_label"] = tbl_out.get("label", "")
+tbl_out["text"] = ""  # tables don't have free text; keep caption/html
+tbl_out = _ensure_cols(tbl_out, base_cols_defaults)
+
+fig_out = fig_df.copy()
+fig_out["kind"] = "figure"
+fig_out["item_id"] = fig_out.get("figure_id", "")
+fig_out["title_label"] = fig_out.get("label", "")
+fig_out["html"] = ""   # no HTML for figures here
+fig_out["text"] = ""   # figures don't have free text; keep caption
+fig_out = _ensure_cols(fig_out, base_cols_defaults)
+
+stage3_all = pd.concat(
+    [sec_out[list(base_cols_defaults.keys())],
+     tbl_out[list(base_cols_defaults.keys())],
+     fig_out[list(base_cols_defaults.keys())]],
+    ignore_index=True
+)
 
 st.subheader("Sections (preview)")
 st.dataframe(sec_df.head(20), use_container_width=True, height=300)
@@ -391,7 +434,53 @@ def ist_timestamp() -> str:
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y%m%d_%H%M%S_IST")
 
-def build_stage3_bundle_zip(sec_df, tbl_df, fig_df) -> bytes:
+# --- Build ONE combined CSV (sections + tables + figures) ---
+def _ensure_cols(df, cols_defaults):
+    for c, d in cols_defaults.items():
+        if c not in df.columns:
+            df[c] = d
+    return df
+
+_base_cols = {
+    "PMCID": "", "PMID": "", "DOI": "", "Title": "", "source": "",
+    "kind": "", "item_id": "", "title_label": "", "caption": "",
+    "html": "", "text": "", "level": 0
+}
+
+# sections → unified
+_sec = sec_df.copy()
+_sec["kind"] = "section"
+_sec["item_id"] = _sec.get("section_id", "")
+_sec["title_label"] = _sec.get("section_title", "")
+_sec["caption"] = ""
+_sec["html"] = ""
+_sec = _ensure_cols(_sec, _base_cols)
+
+# tables → unified
+_tbl = tbl_df.copy()
+_tbl["kind"] = "table"
+_tbl["item_id"] = _tbl.get("table_id", "")
+_tbl["title_label"] = _tbl.get("label", "")
+_tbl["text"] = ""  # tables have caption/html, not free text
+_tbl = _ensure_cols(_tbl, _base_cols)
+
+# figures → unified
+_fig = fig_df.copy()
+_fig["kind"] = "figure"
+_fig["item_id"] = _fig.get("figure_id", "")
+_fig["title_label"] = _fig.get("label", "")
+_fig["html"] = ""   # keep caption only
+_fig["text"] = ""
+_fig = _ensure_cols(_fig, _base_cols)
+
+stage3_all = pd.concat(
+    [_sec[list(_base_cols.keys())],
+     _tbl[list(_base_cols.keys())] if not _tbl.empty else pd.DataFrame(columns=list(_base_cols.keys())),
+     _fig[list(_base_cols.keys())] if not _fig.empty else pd.DataFrame(columns=list(_base_cols.keys()))],
+    ignore_index=True
+)
+
+def build_stage3_bundle_zip(sec_df, tbl_df, fig_df, stage3_all_df) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("sections.csv", sec_df.to_csv(index=False))
@@ -399,15 +488,18 @@ def build_stage3_bundle_zip(sec_df, tbl_df, fig_df) -> bytes:
             zf.writestr("tables.csv", tbl_df.to_csv(index=False))
         if parse_figcaps and not fig_df.empty:
             zf.writestr("figures.csv", fig_df.to_csv(index=False))
+        # include the one-file combined CSV
+        zf.writestr("stage3_all.csv", stage3_all_df.to_csv(index=False))
     return buf.getvalue()
 
 # Build CSV bytes for current run
 sections_csv_bytes = sec_df.to_csv(index=False).encode("utf-8")
 tables_csv_bytes   = tbl_df.to_csv(index=False).encode("utf-8") if parse_tables else None
 figures_csv_bytes  = fig_df.to_csv(index=False).encode("utf-8") if parse_figcaps else None
+all_csv_bytes      = stage3_all.to_csv(index=False).encode("utf-8")
 
 # Build bundle ZIP (timestamped in IST)
-bundle_bytes = build_stage3_bundle_zip(sec_df, tbl_df, fig_df)
+bundle_bytes = build_stage3_bundle_zip(sec_df, tbl_df, fig_df, stage3_all)
 bundle_name  = f"stage3_parsed_bundle_{ist_timestamp()}.zip"
 
 # Persist in session (survives reruns)
@@ -419,6 +511,7 @@ st.session_state.stage3_store.update({
     "sections_csv": sections_csv_bytes,
     "tables_csv": tables_csv_bytes,
     "figures_csv": figures_csv_bytes,
+    "all_csv": all_csv_bytes,
 })
 
 # Also write to disk so a rerun still has files available on server
@@ -426,6 +519,7 @@ Path("stage3_parsed_bundle.zip").write_bytes(bundle_bytes)
 Path("sections.csv").write_bytes(sections_csv_bytes)
 if tables_csv_bytes:  Path("tables.csv").write_bytes(tables_csv_bytes)
 if figures_csv_bytes: Path("figures.csv").write_bytes(figures_csv_bytes)
+Path("stage3_all.csv").write_bytes(all_csv_bytes)
 
 # One-click download (current run)
 st.download_button("⬇️ Download EVERYTHING (ZIP)",
@@ -440,6 +534,10 @@ if tables_csv_bytes:
     st.download_button("Tables (CSV)", data=tables_csv_bytes, file_name="tables.csv", mime="text/csv", key="dl_stage3_tbl")
 if figures_csv_bytes:
     st.download_button("Figures (CSV)", data=figures_csv_bytes, file_name="figures.csv", mime="text/csv", key="dl_stage3_fig")
+st.download_button("ONE combined CSV (stage3_all.csv)", data=all_csv_bytes, file_name="stage3_all.csv", mime="text/csv", key="dl_stage3_all")
+
+st.markdown("---")
+st.caption("Stage 3 extracts structured text from PMC XML (JATS) and basic sections from publisher HTML.")
 
 st.markdown("---")
 st.caption("Stage 3 extracts structured text from PMC XML (JATS) and basic sections from publisher HTML.")
