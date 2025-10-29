@@ -372,6 +372,27 @@ for i, (r, kind, path_str) in enumerate(rows, start=1):
 sec_df = pd.DataFrame(sec_records) if sec_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","section_id","section_title","text","level"])
 tbl_df = pd.DataFrame(tbl_records) if tbl_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","table_id","label","caption","html"])
 fig_df = pd.DataFrame(fig_records) if fig_records else pd.DataFrame(columns=["PMCID","PMID","DOI","Title","source","figure_id","label","caption"])
+
+# --- Enforce expected schema for Stage 4 ---
+# Map and fill for sections
+sec_df = sec_df.copy()
+for col, default in {
+    "PMCID": "", "PMID": "", "DOI": "", "Title": "", "source": "",
+    "section_id": "", "section_title": "", "text": "", "level": 0
+}.items():
+    if col not in sec_df.columns:
+        sec_df[col] = default
+
+# Reorder strictly
+sec_df = sec_df[
+    ["PMCID","PMID","DOI","Title","source","section_id","section_title","text","level"]
+]
+
+# Optional: coerce types
+sec_df["level"] = pd.to_numeric(sec_df["level"], errors="coerce").fillna(0).astype(int)
+
+# Tables and figures don’t need this schema, but keep them as-is
+
 # ---- Build ONE combined CSV: stage3_all.csv ----
 def _ensure_cols(df, cols_defaults):
     for c, d in cols_defaults.items():
