@@ -1,241 +1,198 @@
-# stage4_extract_methods.py
-# Foresight (Full-Text) — Stage 4: Methods extraction
-# Input: sections.csv (+ optional tables.csv, figures.csv) OR Stage-3 ZIP
-# Output: methods_sections.csv, methods_tables.csv, methods_figures.csv + one ZIP bundle
-#
-# Notes:
-# - No 'manifest' anywhere (fixes your NameError)
-# - Robust uploads: CSVs or Stage-3 ZIP; ZIP auto-fills any missing CSVs
-# - Keeps results in st.session_state to avoid vanishing after downloads
-# - One-click "Download EVERYTHING (ZIP)" with IST timestamped filename
+# stage4_summarize.py
+# Foresight (Full-Text) — Stage 4: Summarize & Actionables
+# Input: sections.csv (from Stage 3 ZIP)  |  Output: paper_summaries.csv, report.md, stage4_bundle.zip
 
-import io, re, zipfile
+import re, io, zipfile
 from pathlib import Path
-from datetime import datetime
-try:
-    from zoneinfo import ZoneInfo  # py3.9+
-    IST = ZoneInfo("Asia/Kolkata")
-except Exception:
-    IST = None
-
 import pandas as pd
 import streamlit as st
+from datetime import datetime, timezone, timedelta
 
-APP_TITLE = "Foresight Full-Text — Stage 4 (Extract Methods)"
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-st.caption("Loads Stage-3 outputs → finds Methods-like sections/tables/fig captions → exports CSVs + one ZIP bundle")
+APP = "Foresight Full-Text — Stage 4 (Summarize)"
+IST = timezone(timedelta(hours=5, minutes=30))
 
-# ---------------------- Previous run quick download ----------------------
+# -------------------------- tiny utils --------------------------
+def clean(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+SEC_PRIOR = [
+    r"\babstract\b", r"\bintroduction\b", r"\bbackground\b",
+    r"\bresults?\b", r"\bdiscussion\b", r"\bconclusion(s)?\b",
+    r"\bmaterials?\s+and\s+methods?\b", r"\bmethods?\b"
+]
+SEC_PRIOR_RE = [re.compile(p, re.I) for p in SEC_PRIOR]
+
+METHOD_HINTS = re.compile(
+    r"(conjugation|site[-\s]?specific|thiol|amine|maleimide|val[-\s]?cit|vc[-\s]?pabc|spaac|dbco|tetrazine|tco|"
+    r"transglutaminase|sortase|glycan|hydrazone|disulfide|non[-\s]?cleavable|qc|hplc|sec[-\s]?mals|msd|bli|dar|hic|tff|"
+    r"scale[-\s]?up|gmp|cmc|qbd|pat|hpapi|containment)", re.I)
+
+SIGNALS = re.compile(
+    r"(her2|trop[-\s]?2|nectin[-\s]?4|cldn18\.?2|egfr|her3|5t4|frα|fr[ -]?alpha|"
+    r"mmae|dm1|dm4|sn[-\s]?38|pbd|duocarmycin|auristatin)", re.I)
+
+SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+def pick_sections(df_paper):
+    # prefer specific sections by title; fallback to longest text
+    sec_texts = []
+    for _, r in df_paper.iterrows():
+        title = str(r.get("section_title",""))
+        text  = str(r.get("text",""))
+        score = 0
+        for w, rx in enumerate(SEC_PRIOR_RE):
+            if rx.search(title):
+                score = max(score, 100 - 5*w)
+        sec_texts.append((score, len(text), title, text))
+    if not sec_texts:
+        return ""
+    sec_texts.sort(reverse=True)  # by score then length
+    # take top 4 chunks
+    return " ".join([t[3] for t in sec_texts[:4]])
+
+def bulletize(text, n=7):
+    sents = SENT_SPLIT.split(clean(text))
+    # quick de-dup and filter
+    uniq = []
+    seen = set()
+    for s in sents:
+        ss = clean(s)
+        if len(ss) < 40: continue
+        key = ss.lower()[:120]
+        if key in seen: continue
+        seen.add(key)
+        uniq.append(ss)
+        if len(uniq) >= n: break
+    return ["• " + u for u in uniq]
+
+def extract_methods(text):
+    lines = []
+    for sent in SENT_SPLIT.split(clean(text)):
+        if METHOD_HINTS.search(sent):
+            lines.append("– " + clean(sent))
+        if len(lines) >= 8: break
+    return lines
+
+def extract_signals(text):
+    hits = sorted(set(m.group(0).upper() for m in SIGNALS.finditer(text)))
+    return ", ".join(hits) if hits else ""
+
+def now_ist_stamp():
+    return datetime.now(IST).strftime("%Y-%m-%d_%H%M%S_IST")
+
+# ------------------------------ UI ------------------------------
+st.set_page_config(page_title=APP, layout="wide")
+st.title(APP)
+st.caption("Reads sections.csv from Stage 3 and produces a human-friendly summary report + a single ZIP bundle.")
+
+# Previous run fast downloads
 prev = st.session_state.get("stage4_store")
 if prev:
     with st.expander("⬇️ Previous run — quick downloads", expanded=False):
-        st.download_button("Download EVERYTHING (ZIP)",
-                           data=prev["bundle_zip"],
-                           file_name=prev["bundle_name"],
-                           mime="application/zip",
-                           key="prev_bundle")
-        st.download_button("methods_sections.csv",
-                           data=prev["sec_csv"],
-                           file_name="methods_sections.csv",
-                           mime="text/csv",
-                           key="prev_sec")
-        if prev.get("tbl_csv"):
-            st.download_button("methods_tables.csv",
-                               data=prev["tbl_csv"],
-                               file_name="methods_tables.csv",
-                               mime="text/csv",
-                               key="prev_tbl")
-        if prev.get("fig_csv"):
-            st.download_button("methods_figures.csv",
-                               data=prev["fig_csv"],
-                               file_name="methods_figures.csv",
-                               mime="text/csv",
-                               key="prev_fig")
+        st.download_button("Report (Markdown)", data=prev["report_md"], file_name=prev["report_name"], mime="text/markdown")
+        st.download_button("Paper summaries (CSV)", data=prev["summ_csv"], file_name="paper_summaries.csv", mime="text/csv")
+        st.download_button("Download EVERYTHING (ZIP)", data=prev["bundle_zip"], file_name=prev["bundle_name"], mime="application/zip")
 
-# ----------------------------- Controls -----------------------------
 col1, col2 = st.columns([2,1])
 with col1:
-    sec_file = st.file_uploader("Upload sections.csv", type=["csv"])
-    tbl_file = st.file_uploader("Upload tables.csv (optional)", type=["csv"])
-    fig_file = st.file_uploader("Upload figures.csv (optional)", type=["csv"])
-    zip_stage3 = st.file_uploader("Or upload Stage-3 bundle ZIP", type=["zip"])
+    sec_csv = st.file_uploader("Upload sections.csv (from Stage 3)", type=["csv"])
+    path_text = st.text_input("Or path to sections.csv (optional)", value="")
 with col2:
-    max_rows = st.number_input("Max rows to scan (per file)", min_value=100, max_value=200000, value=50000, step=1000)
-    include_tables = st.checkbox("Include tables", value=True)
-    include_figs = st.checkbox("Include figure captions", value=True)
+    max_papers = st.number_input("Max papers to summarize (K)", 1, 500, 30, 1)
+    include_methods = st.checkbox("Include Methods bullets", value=True)
 
-run = st.button("Extract Methods")
+run = st.button("Summarize")
 
 if not run:
-    st.info("Upload sections.csv (and optionally tables/figures CSVs or a Stage-3 ZIP), then click **Extract Methods**.")
+    st.info("Upload your Stage-3 sections.csv and click **Summarize**.")
     st.stop()
 
-# ----------------------------- Load inputs -----------------------------
-def _read_csv_upload(f):
-    if f is None: return None
-    try:
-        return pd.read_csv(f)
-    except Exception:
-        return None
+# --------------------------- load ---------------------------
+try:
+    if sec_csv is not None:
+        df = pd.read_csv(sec_csv)
+    elif path_text.strip():
+        df = pd.read_csv(path_text.strip())
+    else:
+        st.error("Please provide sections.csv."); st.stop()
+except Exception as e:
+    st.error(f"Failed to read sections.csv: {e}"); st.stop()
 
-sections_df = _read_csv_upload(sec_file)
-tables_df   = _read_csv_upload(tbl_file)
-figures_df  = _read_csv_upload(fig_file)
+need_cols = {"PMCID","PMID","DOI","Title","section_title","text"}
+miss = [c for c in need_cols if c not in df.columns]
+if miss:
+    st.error(f"sections.csv missing columns: {miss}"); st.stop()
 
-# If ZIP is provided, fill missing ones from inside the ZIP
-if zip_stage3 is not None:
-    try:
-        with zipfile.ZipFile(zip_stage3) as zf:
-            if sections_df is None and "sections.csv" in zf.namelist():
-                sections_df = pd.read_csv(io.BytesIO(zf.read("sections.csv")))
-            if include_tables and tables_df is None and "tables.csv" in zf.namelist():
-                tables_df = pd.read_csv(io.BytesIO(zf.read("tables.csv")))
-            if include_figs and figures_df is None and "figures.csv" in zf.namelist():
-                figures_df = pd.read_csv(io.BytesIO(zf.read("figures.csv")))
-    except Exception as e:
-        st.error(f"Stage-3 ZIP read error: {e}")
-        st.stop()
+# ------------------------ group & summarize ------------------------
+# keep a stable paper key
+df["paper_key"] = df["PMCID"].fillna("").astype(str)
+empty_mask = df["paper_key"].eq("") & df["DOI"].notna()
+df.loc[empty_mask, "paper_key"] = "DOI:" + df.loc[empty_mask, "DOI"].astype(str)
 
-if sections_df is None:
-    st.error("sections.csv is required (direct upload or inside Stage-3 ZIP).")
-    st.stop()
+orders = list(dict.fromkeys(df["paper_key"].tolist()))
+summ_rows = []
+stamp = now_ist_stamp()
 
-# Truncate for safety
-if len(sections_df) > max_rows: sections_df = sections_df.head(max_rows)
-if include_tables and tables_df is not None and len(tables_df) > max_rows: tables_df = tables_df.head(max_rows)
-if include_figs and figures_df is not None and len(figures_df) > max_rows: figures_df = figures_df.head(max_rows)
+for pk in orders[:int(max_papers)]:
+    sub = df[df["paper_key"] == pk]
+    if sub.empty: continue
+    title = sub["Title"].dropna().astype(str).unique()
+    title = title[0] if len(title) else ""
 
-# ------------------------ Methods heuristics ------------------------
-# 1) Headings likely to mark Methods
-METHOD_HEAD_PAT = re.compile(
-    r"""
-    \b(
-       materials?\s*(and|&)\s*methods? |
-       methods? |
-       methodology |
-       experimental(\s+procedures?)? |
-       reagents? |
-       (cell|cellular)\s+culture |
-       statistical\s+analysis |
-       animals?\s*(and|&)\s*(ethics|welfare)? |
-       sample\s+preparation |
-       data\s+analysis |
-       protocol(s)? |
-       instrumentation |
-       chromatography |
-       purification |
-       conjugation |
-       synthesis |
-       analytics? |
-       assay\s+procedures? |
-       (mass|liquid)\s+spectrometry |
-       hplc|uplc|sec[-\s]?mals? | hic | tff
-    )\b
-    """,
-    re.IGNORECASE | re.VERBOSE
-)
+    merged = pick_sections(sub)
+    bullets = bulletize(merged, n=7)
+    meth = extract_methods(merged) if include_methods else []
+    sigs = extract_signals(merged)
 
-# 2) Verb/keyword cues inside text
-METHOD_TEXT_CUES = re.compile(
-    r"(conjugat|synthes|prepare|incubat|purif|analy[sz]e|measure|assay|"
-    r"buffer|reagent|centrifug|chromatograph|gradient|flow\s*rate|"
-    r"instrument|parameter|protocol|step|mix|dilut|pH\s*\d|"
-    r"transglutaminase|sortase|maleimide|val[-\s]?cit|vc[-\s]?pabc|dar\b|"
-    r"msd|bli|elisa|hplc|uplc|sec[-\s]?mals?|hic|tff|hpapi|containment)",
-    re.IGNORECASE
-)
+    summ_rows.append({
+        "paper_key": pk,
+        "Title": title,
+        "Signals": sigs,
+        "SummaryBullets": "\n".join(bullets),
+        "MethodsBullets": "\n".join(meth)
+    })
 
-# 3) Table caption cues
-TABLE_CUES = re.compile(
-    r"(reagent|buffer|composition|parameters?|settings?|antibody|linker|payload|"
-    r"conjugation|dar\b|chromatograph|hplc|uplc|sec|hic|tff|condition|concentration)",
-    re.IGNORECASE
-)
+summ_df = pd.DataFrame(summ_rows)
 
-# 4) Figure caption cues (optional)
-FIG_CUES = re.compile(
-    r"(workflow|scheme|synthe|setup|apparatus|protocol|conjugation|"
-    r"chromatograph|hplc|dar\b)",
-    re.IGNORECASE
-)
+# ------------------------ compose report.md ------------------------
+lines = []
+lines.append(f"# ADC Full-Text Summary Report ({stamp})")
+lines.append("")
+lines.append(f"Total papers summarized: {len(summ_df)}")
+lines.append("")
+for i, r in enumerate(summ_df.itertuples(), start=1):
+    lines.append(f"## {i}. {r.Title or r.paper_key}")
+    if r.Signals:
+        lines.append(f"**Signals/Entities:** {r.Signals}")
+    if r.SummaryBullets:
+        lines.append("**What’s new / Key points**")
+        lines.extend(r.SummaryBullets.splitlines())
+    if include_methods and r.MethodsBullets:
+        lines.append("**Methods & Process notes**")
+        lines.extend(r.MethodsBullets.splitlines())
+    lines.append("")
 
-def _clean(s):
-    return re.sub(r"\s+", " ", str(s or "").strip())
+report_md = ("\n".join(lines)).encode("utf-8")
+summ_csv = summ_df.to_csv(index=False).encode("utf-8")
 
-# ------------------------ Filter sections ------------------------
-sec_cols = [c for c in ["PMCID","PMID","DOI","Title","source","section_id","section_title","text","level"] if c in sections_df.columns]
-sdf = sections_df[sec_cols].copy()
-
-# mark by heading and/or text cues
-sdf["__by_heading"] = sdf.get("section_title","").astype(str).str.contains(METHOD_HEAD_PAT)
-sdf["__by_text"]    = sdf.get("text","").astype(str).str.contains(METHOD_TEXT_CUES)
-
-methods_sections = sdf[(sdf["__by_heading"]) | (sdf["__by_text"])].copy()
-for c in ["__by_heading","__by_text"]:
-    if c in methods_sections.columns: methods_sections.drop(columns=[c], inplace=True)
-
-# ------------------------ Filter tables (optional) ------------------------
-methods_tables = pd.DataFrame()
-if include_tables and tables_df is not None and not tables_df.empty:
-    tcols = [c for c in ["PMCID","PMID","DOI","Title","source","table_id","label","caption","html"] if c in tables_df.columns]
-    tdf = tables_df[tcols].copy()
-    tdf["__hit"] = tdf.get("caption","").astype(str).str.contains(TABLE_CUES) | tdf.get("label","").astype(str).str.contains(TABLE_CUES)
-    methods_tables = tdf[tdf["__hit"]].drop(columns=["__hit"])
-
-# ------------------------ Filter figures (optional) ------------------------
-methods_figures = pd.DataFrame()
-if include_figs and figures_df is not None and not figures_df.empty:
-    fcols = [c for c in ["PMCID","PMID","DOI","Title","source","figure_id","label","caption"] if c in figures_df.columns]
-    fdf = figures_df[fcols].copy()
-    fdf["__hit"] = fdf.get("caption","").astype(str).str.contains(FIG_CUES) | fdf.get("label","").astype(str).str.contains(FIG_CUES)
-    methods_figures = fdf[fdf["__hit"]].drop(columns=["__hit"])
-
-# ------------------------ Previews ------------------------
-st.subheader("Methods sections (preview)")
-st.dataframe(methods_sections.head(20), use_container_width=True, height=300)
-
-if not methods_tables.empty:
-    st.subheader("Methods tables (preview)")
-    st.dataframe(methods_tables.head(10), use_container_width=True, height=260)
-
-if not methods_figures.empty:
-    st.subheader("Methods figure captions (preview)")
-    st.dataframe(methods_figures.head(10), use_container_width=True, height=260)
-
-# ------------------------ Exports + single ZIP ------------------------
-sec_csv = methods_sections.to_csv(index=False).encode("utf-8")
-tbl_csv = methods_tables.to_csv(index=False).encode("utf-8") if not methods_tables.empty else None
-fig_csv = methods_figures.to_csv(index=False).encode("utf-8") if not methods_figures.empty else None
-
-# timestamped bundle name (IST if available)
-dt = datetime.now(tz=IST) if IST else datetime.now()
-stamp = dt.strftime("%Y%m%d_%H%M%S_IST") if IST else dt.strftime("%Y%m%d_%H%M%S")
-bundle_name = f"stage4_methods_bundle_{stamp}.zip"
-
+# ------------------------ bundle + sticky downloads ------------------------
+bundle_name = f"stage4_summary_bundle_{stamp}.zip"
 buf = io.BytesIO()
 with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-    zf.writestr("methods_sections.csv", sec_csv)
-    if tbl_csv is not None: zf.writestr("methods_tables.csv", tbl_csv)
-    if fig_csv is not None: zf.writestr("methods_figures.csv", fig_csv)
-bundle_zip = buf.getvalue()
+    zf.writestr("report.md", report_md)
+    zf.writestr("paper_summaries.csv", summ_df.to_csv(index=False))
 
-# persist across reruns
-st.session_state.stage4_store = {
-    "bundle_zip": bundle_zip,
+# persist in session so downloads don’t vanish on rerun
+st.session_state["stage4_store"] = {
+    "report_md": report_md,
+    "report_name": "report.md",
+    "summ_csv": summ_csv,
+    "bundle_zip": buf.getvalue(),
     "bundle_name": bundle_name,
-    "sec_csv": sec_csv,
-    "tbl_csv": tbl_csv,
-    "fig_csv": fig_csv,
 }
 
-# buttons
-st.download_button("Download EVERYTHING (ZIP)", data=bundle_zip, file_name=bundle_name, mime="application/zip", key="dl_all_zip")
-st.download_button("methods_sections.csv", data=sec_csv, file_name="methods_sections.csv", mime="text/csv", key="dl_sec")
-if tbl_csv is not None:
-    st.download_button("methods_tables.csv", data=tbl_csv, file_name="methods_tables.csv", mime="text/csv", key="dl_tbl")
-if fig_csv is not None:
-    st.download_button("methods_figures.csv", data=fig_csv, file_name="methods_figures.csv", mime="text/csv", key="dl_fig")
-
-st.markdown("---")
-st.caption("Heuristics: title regex + method verbs for sections; caption cues for tables/figures. Adjust patterns in METHOD_HEAD_PAT / METHOD_TEXT_CUES / TABLE_CUES / FIG_CUES as needed.")
+st.success("Summaries generated.")
+st.download_button("Report (Markdown)", data=report_md, file_name="report.md", mime="text/markdown")
+st.download_button("Paper summaries (CSV)", data=summ_csv, file_name="paper_summaries.csv", mime="text/csv")
+st.download_button("Download EVERYTHING (ZIP)", data=st.session_state["stage4_store"]["bundle_zip"],
+                   file_name=bundle_name, mime="application/zip")
